@@ -30,7 +30,7 @@ class AuthSwitcher(object):
 
     def __init__(self, os_service_endpoint=None):
         self._conf = self._configure_options()
-        self._ks_client = None
+        self._sess = None
         self.os_service_endpoint = os_service_endpoint
         # initial logger
         self._logger = self._get_logger()
@@ -56,7 +56,7 @@ class AuthSwitcher(object):
         vars = filter(lambda x: x[0].startswith('OS_'), os.environ.iteritems())
         conf_keys = self.conf.keys()
         for k, v in vars:
-        # Try the full var first
+            # Try the full var first
             n = k.lower()
             cands = (n, n[3:])
             for var in cands:
@@ -106,11 +106,11 @@ class AuthSwitcher(object):
 
         nsd_opt_args = {
             'help': ('Use null-sessions in version discovey.'
-                    'This shouldn\'t be a gloabl opt.'),
+                     'This shouldn\'t be a gloabl opt.'),
             'default': False,
         }
         if oslo_cfg_semver >= min_semver:
-             nsd_opt_args['advanced'] = True
+            nsd_opt_args['advanced'] = True
 
         cli_global_opts = [
             cfg.BoolOpt('debug',
@@ -219,6 +219,10 @@ class AuthSwitcher(object):
         return _conf
 
     @property
+    def session(self):
+        return self._sess
+
+    @property
     def conf(self):
         return self._conf
 
@@ -283,7 +287,8 @@ class AuthSwitcher(object):
                     avail_plugins = loading.get_available_plugin_names()
                     logger.debug('Available plugin loaders: %s' %
                                  sorted(plugin_loaders.iteritems()))
-                    logger.debug('Available plugins: %s' % sorted(avail_plugins))
+                    logger.debug('Available plugins: %s' %
+                                 sorted(avail_plugins))
                 loader = loading.get_plugin_loader('password')
                 self.logger.debug('loader: %s' % loader)
                 auth_args = self._get_auth_args()
@@ -295,8 +300,8 @@ class AuthSwitcher(object):
                         s = session.Session()
                     else:
                         s = session.Session(auth=auth)
-                    discover = kauth_discover.Discover(session=s,
-                                                       url=self.os_service_endpoint)
+                    url = self.os_service_endpoint
+                    discover = kauth_discover.Discover(session=s, url=url)
                     self.logger.debug('discover: %s' % discover)
                     self.logger.debug('discovered version data: %s' %
                                       discover.version_data())
@@ -325,7 +330,6 @@ class AuthSwitcher(object):
                 # TODO: use discovery
                 if self.conf.keystoneclient.use_discovery:
                     # ^^^ seems not possible without versioned urls?
-                    # auth_args = self._get_auth_args(self.conf.os_identity_api_version)
                     auth_args = self._get_auth_args()
                     # TODO: could i use keystoneauth1 loading here...?
                     auth = self._get_password_auth(**auth_args)
@@ -333,13 +337,14 @@ class AuthSwitcher(object):
                     # /home/kmidzi/projects/rdtibcc-679/local/lib/python2.7/site-packages/keystoneclient/session.py:17
                     # what is implication of import keystoneauth1? advent?
                     try:
-                        discover = ks_discover.Discover(session=sess,
-                                                        url=self.os_service_endpoint)
+                        url = self.os_service_endpoint
+                        discover = ks_discover.Discover(session=sess, url=url)
                         self.logger.debug('discover: %s' % discover)
                         self.logger.debug('discovered version data: %s' %
                                           discover.version_data())
                         disc_auth_url = discover.url_for(version)
-                        self.logger.debug('discovered urls: %s' % disc_auth_url)
+                        self.logger.debug('discovered urls: %s' %
+                                          disc_auth_url)
                     except Exception as e:
                         raise(Exception('Could not discover: %s' % e.message))
                 else:
@@ -349,6 +354,7 @@ class AuthSwitcher(object):
             else:
                 raise Exception('Non-session approach not implemented.')
 
+        self._sess = sess
         self.logger.info('Auth object: %s' % auth)
         self.logger.info('Session object: %s' % sess)
         return keystone
@@ -357,6 +363,7 @@ class AuthSwitcher(object):
 if __name__ == '__main__':
     IGNORED_WARNINGS = ('InsecurePlatformWarning', 'SNIMissingWarning')
     import requests
+    from pprint import pprint
 
     for w in IGNORED_WARNINGS:
         cls = getattr(requests.packages.urllib3.exceptions, w, None)
@@ -370,16 +377,35 @@ if __name__ == '__main__':
         sys.exit(e)
     logger = auth_switcher.logger
     auth_switcher.conf.log_opt_values(logger=logger, lvl=logging.INFO)
+    ks_client = auth_switcher.Client()
+    version = auth_switcher.conf.os_identity_api_version
 
-    def list_projects(auth):
-        version = auth.conf.os_identity_api_version
-        keystone = auth.Client()
+    def list_projects():
         if version == '2.0':
-            return keystone.tenants.list()
+            return ks_client.tenants.list()
         elif version == '3':
-            return keystone.projects.list()
+            return ks_client.projects.list()
 
-    sys.exit(logger.info('Projects class: %s' %
-                         type(list_projects(auth_switcher)[0])))
+    def print_token_data():
+        conf = auth_switcher.conf
+        if conf.use_keystoneauth1:
+            if version == '2.0':
+                pprint(ks_client.session.auth.auth_ref._token)
+            elif version == '3':
+                pprint(ks_client.session.auth.auth_ref._data)
+            else:
+                raise Exception('Unsupported version %s' % version)
+        else:
+            if version == '2.0':
+                # keystoneauth1.exceptions.http.NotFound: The resource could not be found. (HTTP 404)
+                pprint(ks_client.session.auth.auth_ref._token)
+            elif version == '3':
+                pprint(ks_client.session.auth.auth_ref)
+            else:
+                raise Exception('Unsupported version %s' % version)
+
+    logger.info('Projects class: %s' % type(list_projects()[0]))
+    logger.info('Auth Ref/Token data:')
+    print_token_data()
 
 # vim:ts=4:sw=4:shiftround:et:smartindent
