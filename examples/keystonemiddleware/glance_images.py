@@ -2,22 +2,21 @@
 
 # http://www.jamielennox.net/blog/2015/09/10/user-auth-in-openstack-services
 from glanceclient import client
-import json
-from keystoneclient import client as ks_client
-from keystoneclient import auth as ks_auth
-from keystoneclient import session
 from keystoneclient.auth.identity import v2, v3
+from keystoneclient import auth as ks_auth
+from keystoneclient import client as ks_client
+from keystoneclient import session
 from keystonemiddleware import auth_token
 from oslo_config import cfg
-import webob.dec
 from wsgiref import simple_server
+import json
+import logging
 import os
 import sys
+import webob.dec
 
 CONF = cfg.CONF
 CONF(project='testservice')
-#print(map(lambda x: x.name, ks_auth.get_common_conf_options()))
-#print(map(lambda x: x.name, ks_auth.get_plugin_options('v3password')))
 v3.Password.register_conf_options(CONF, 'communication')
 _vars = filter(lambda x: x[0].startswith('OS_'), os.environ.iteritems())
 conf_keys = CONF.keys()
@@ -39,51 +38,48 @@ auth_args = {
     'username': CONF.communication.username,
     'password': CONF.communication.password,
     'project_name': CONF.communication.project_name,
+    'user_domain_name': CONF.communication.user_domain_name,
     'project_domain_name': CONF.communication.project_domain_name
 }
-#auth = v3.Password(auth_args['auth_url'],**auth_args)
-auth = v3.Password(**auth_args)
-SESSION = session.Session(auth=auth)
+
+AUTH = v3.Password(**auth_args)
+SESSION = session.Session(auth=AUTH)
 
 @webob.dec.wsgify
 def app(req):
-# N.B. below does not work
-# 
-# DiscoveryFailure: Not enough information to determine URL. Provide either a Session, or auth_url or endpoint
-# Loaded session will not set 'auth' attribute
-    # TODO(kamidzi): need to pick this apart
-    SESSION.auth = req.environ['keystone.token_auth']._user_auth_ref
-    print(type(req.environ['keystone.token_auth']))
-    for k, v in req.environ['keystone.token_auth'].iteritems():
-        print('{}: {}'.format(k, type(v)))
+    supplied_auth = None
+    try:
+        #<class 'keystonemiddleware.auth_token._user_plugin.UserAuthPlugin'>
+        supplied_auth = req.environ['keystone.token_auth'] #._auth
+        # Can also use _auth attribute that will be Identity Plugin
+    except AttributeError, e:
+        for k, v in req.environ['keystone.token_auth'].__dict__.iteritems():
+            print('{}: {}'.format(k, type(v)))
 
+    # Use orignal session, with original auth information
     kclient = ks_client.Client('3', session=SESSION)
     projects = kclient.projects.list()
 
-    # Clear the auth added above to demonstrate glanceclient 'auth' param
-    session.auth = None
-# TODO(kamidzi): Need to handle InvalidToken exception
-
+    # TODO(kamidzi): Need to handle InvalidToken exception
+    # Now use supplied auth credentials
     glance = client.Client('2',
                            session=SESSION,
-                           auth=req.environ['keystone.token_auth'])
-
+                           auth=supplied_auth)
+    images = glance.images.list()
     resp = {
         'keystoneclient.projects': [p.name for p in projects],
-        'glanceclient.images': [i.name for i in glance.images.list()],
+        'glanceclient.images': [i.name for i in images],
         'keystone.token_auth.user': req.environ['keystone.token_auth'].user._data,
     }
 
-    return webob.Response(json.dumps(resp))
+    return webob.Response(json.dumps(resp, indent=2))
 
 if __name__ == '__main__':
     import logging
-    import sys
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     logger = logging.getLogger(cfg.CONF.project)
     CONF.log_opt_values(logger, lvl=logging.INFO)
 
     app = auth_token.AuthProtocol(app,{})
     server = simple_server.make_server('', 8001, app)
-    server.handle_request()
     server.serve_forever()
