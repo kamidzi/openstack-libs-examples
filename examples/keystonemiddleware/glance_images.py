@@ -2,16 +2,17 @@
 
 # http://www.jamielennox.net/blog/2015/09/10/user-auth-in-openstack-services
 from glanceclient import client
-import json
 from keystoneauth1 import loading
 from keystoneauth1 import session
 from keystoneclient import client as ks_client
 from keystonemiddleware import auth_token
 from oslo_config import cfg
-import webob.dec
 from wsgiref import simple_server
+import json
+import logging
 import os
 import sys
+import webob.dec
 
 CONF = cfg.CONF
 CONF(project='testservice')
@@ -32,6 +33,7 @@ CONF(sys.argv[1:])
 # TODO: --help doesn't seem to work either way...
 # Doesn't seem to matter whether keystoneclient.session.Session or keystoneauth1.session.Session
 SESSION = loading.session.load_from_conf_options(cfg.CONF, 'communication')
+AUTH = SESSION.auth
 
 @webob.dec.wsgify
 def app(req):
@@ -39,29 +41,25 @@ def app(req):
 # 
 # DiscoveryFailure: Not enough information to determine URL. Provide either a Session, or auth_url or endpoint
 # Loaded session will not set 'auth' attribute
-    SESSION.auth = req.environ['keystone.token_auth']._auth
-    kclient = ks_client.Client('3', session=SESSION)
+    # req.environ['keystone.token_auth'] should be instance of keystonemiddleware.auth_token._user_plugin.UserAuthPlugin
+    # ._auth could be instance of keystoneauth1.identity.generic.password.Password
+    auth = req.environ['keystone.token_auth']
+    kclient = ks_client.Client('3', session=SESSION, auth=auth)
     projects = kclient.projects.list()
 
-    # Clear the auth added above to demonstrate glanceclient 'auth' param
-    session.auth = None
-# TODO(kamidzi): Need to handle InvalidToken exception
-
+    # Use superuser credentials from application config
     glance = client.Client('2',
-                           session=SESSION,
-                           auth=req.environ['keystone.token_auth'])
+                           session=SESSION)
 
     resp = {
         'keystoneclient.projects': [p.name for p in projects],
         'glanceclient.images': [i.name for i in glance.images.list()],
-        'keystone.token_auth.user': req.environ['keystone.token_auth'].user._data,
+        'keystone.token_auth.user': auth.user._data,
     }
 
     return webob.Response(json.dumps(resp))
 
 if __name__ == '__main__':
-    import logging
-    import sys
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     logger = logging.getLogger(cfg.CONF.project)
 
